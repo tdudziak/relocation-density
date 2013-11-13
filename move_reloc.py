@@ -3,6 +3,7 @@ from __future__ import print_function
 import glob
 import pickle
 import os
+import sys
 
 import elftools.construct
 
@@ -22,7 +23,7 @@ class Statistics(object):
     def print(self):
         for name, val in self.__dict__.items():
             try:
-                print("%20s: %d" % (name, val))
+                print("%20s: %d" % (name, val), file=sys.stderr)
             except TypeError: pass
 
 stats = Statistics()
@@ -98,41 +99,57 @@ def set_preffered(file_name, symbol_map):
             p.patch_stream(fp)
 
 
-def iter_path_objects(path):
-    for file_name in glob.glob(path + "/*.o"):
-        with open(file_name, 'rb') as fp:
-            elf_file = ELFFile(fp)
-            yield (os.path.basename(file_name), elf_file)
+class ObjectDir(object):
+    def __init__(self, path):
+        self.path = path
+        self.resources = dict()
+
+    def filenames(self):
+        return glob.glob(self.path + "/*.o")
+
+    def iter_objects(self):
+        for file_name in self.filenames():
+            with open(file_name, 'rb') as fp:
+                elf_file = ELFFile(fp)
+                yield (os.path.basename(file_name), elf_file)
+
+    def get_resource(self, name):
+        file_name = self.path + '/' + name + '.pickle'
+        result = self.resources.get(name)
+
+        if result is None:
+            try:
+                sys.stderr.write('Trying to load ' + name + ' from file...')
+                sys.stderr.flush()
+                with open(file_name, 'rb') as fp:
+                    result = pickle.load(fp)
+                sys.stderr.write('DONE\n')
+            except IOError:
+                sys.stderr.write('FAILED\nCreating ' + name + '...')
+                sys.stderr.flush()
+
+                if name == 'section_map':
+                    result = create_section_map(self)
+                elif name == 'symbol_map':
+                    result = create_symbol_map(self)
+                else:
+                    raise ValueError('invalid resource')
+
+                sys.stderr.write('DONE\nSaving ' + name + ' to disk...')
+                sys.stderr.flush()
+                with open(file_name, 'wb') as fp:
+                    pickle.dump(result, fp)
+                sys.stderr.write('DONE\n')
+
+        self.resources[name] = result
+        return result
 
 
-def get_resource(path, name):
-    file_name = path + '/' + name + '.pickle'
-
-    try:
-        with open(file_name, 'rb') as fp:
-            return pickle.load(fp)
-    except IOError:
-        pass
-
-    if name == 'section_map':
-        result = create_section_map(path)
-    elif name == 'symbol_map':
-        section_map = get_resource(path, 'section_map')
-        result = create_symbol_map(path, section_map)
-    else:
-        raise ValueError('invalid resource')
-
-    with open(file_name, 'wb') as fp:
-        pickle.dump(result, fp)
-
-    return result
-
-
-def create_section_map(path, start_location=0x4003e0):
+def create_section_map(object_dir, start_location=0x4003e0):
     section_map = dict()
     section_start = start_location
 
-    for ident, elf_file in iter_path_objects(path):
+    for ident, elf_file in object_dir.iter_objects():
         # TODO: support alignment, page-level permissions etc.
         for section in elf_file.iter_sections():
             # TODO: skip sections that will not be loaded to memory (.comment etc)
@@ -143,10 +160,11 @@ def create_section_map(path, start_location=0x4003e0):
     return section_map
 
 
-def create_symbol_map(path, section_map):
+def create_symbol_map(object_dir):
     symbol_map = dict()
+    section_map = object_dir.get_resource('section_map')
 
-    for ident, elf_file in iter_path_objects(path):
+    for ident, elf_file in object_dir.iter_objects():
         symtab = elf_file.get_section_by_name('.symtab')
         if symtab is None: continue # no symbols
 
@@ -164,10 +182,11 @@ def create_symbol_map(path, section_map):
 
 
 def process_directory(path):
-    section_map = get_resouce(path, 'section_map')
-    symbol_map = get_resouce(path, 'symbol_map')
+    object_dir = ObjectDir(path)
+    # section_map = get_resource(path, 'section_map')
+    # symbol_map = get_resource(path, 'symbol_map')
 
-    for file_name in glob.glob(path + "/*.o"):
-        set_preffered(file_name, symbol_map) # TODO: section locations
+    # for file_name in glob.glob(path + "/*.o"):
+        # set_preffered(file_name, symbol_map) # TODO: section locations
 
     stats.print()
