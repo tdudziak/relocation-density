@@ -48,9 +48,12 @@ class Patch(object):
             int64.build_stream(new[i], fp)
 
 
-# TODO: support section map
-def set_preffered(file_name, symbol_map):
+# TODO: also process relocations in other sections (this supports only .text)
+def set_preffered(file_name, object_dir):
     patches = []
+    section_map = object_dir.get_resource('section_map')
+    symbol_map = object_dir.get_resource('symbol_map')
+    obj_id = os.path.basename(file_name)
 
     with open(file_name, 'rb') as fp:
         ef = ELFFile(fp)
@@ -75,20 +78,18 @@ def set_preffered(file_name, symbol_map):
                 stats.event('relocations_wrong_type')
                 continue
 
-            # get symbol name (while supporting section symbols)
             sym = symtab.get_symbol(reloc.entry.r_info_sym)
             if sym.entry.st_info.type == 'STT_SECTION':
-                name = ef.get_section(sym.entry.st_shndx).name
+                section = ef.get_section(sym.entry.st_shndx)
+                # TODO: what about sections not in section_map?
+                address = section_map[(obj_id, section.name)]
             else:
-                name = symtab.get_symbol(reloc.entry.r_info_sym).name
+                if sym.name not in symbol_map:
+                    stats.event('relocations_no_prefloc')
+                    stats.missing_symbols.add(sym.name)
+                    continue
+                address = symbol_map[sym.name]
 
-            if name not in symbol_map:
-                stats.event('relocations_no_prefloc')
-                stats.missing_symbols.add(name)
-                continue
-
-            assert reloc.is_RELA()
-            address = symbol_map[name]
             offset = text_offset + reloc.entry.r_offset
             a_offset = rela_text_offset + i*ef.structs.Elf_Rela.sizeof() + addend_offset
             patches.append(Patch(offset, a_offset, address))
@@ -183,10 +184,8 @@ def create_symbol_map(object_dir):
 
 def process_directory(path):
     object_dir = ObjectDir(path)
-    # section_map = get_resource(path, 'section_map')
-    # symbol_map = get_resource(path, 'symbol_map')
 
-    # for file_name in glob.glob(path + "/*.o"):
-        # set_preffered(file_name, symbol_map) # TODO: section locations
+    for file_name in object_dir.filenames():
+         set_preffered(file_name, object_dir)
 
     stats.print()
