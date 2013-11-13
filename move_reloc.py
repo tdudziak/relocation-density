@@ -47,6 +47,7 @@ class Patch(object):
             int64.build_stream(new[i], fp)
 
 
+# TODO: support section map
 def set_preffered(file_name, symbol_map):
     patches = []
 
@@ -97,64 +98,76 @@ def set_preffered(file_name, symbol_map):
             p.patch_stream(fp)
 
 
-def get_symbol_locations(elf_file, text_location):
-    result = dict()
-    symtab = elf_file.get_section_by_name('.symtab')
-    text_shndx = min(i for (i, x) in enumerate(elf_file.iter_sections()) if x.name == '.text')
+def iter_path_objects(path):
+    for file_name in glob.glob(path + "/*.o"):
+        with open(file_name, 'rb') as fp:
+            elf_file = ELFFile(fp)
+            yield (os.path.basename(file_name), elf_file)
 
-    if symtab is not None:
-        for symbol in symtab.iter_symbols():
-            # only process symbols for the .text section
-            if symbol.entry.st_shndx == text_shndx and len(symbol.name) > 0:
-                result[symbol.name] = text_location + symbol.entry.st_value
+
+def get_resource(path, name):
+    file_name = path + '/' + name + '.pickle'
+
+    try:
+        with open(file_name, 'rb') as fp:
+            return pickle.load(fp)
+    except IOError:
+        pass
+
+    if name == 'section_map':
+        result = create_section_map(path)
+    elif name == 'symbol_map':
+        section_map = get_resource(path, 'section_map')
+        result = create_symbol_map(path, section_map)
+    else:
+        raise ValueError('invalid resource')
+
+    with open(file_name, 'wb') as fp:
+        pickle.dump(result, fp)
 
     return result
 
 
-def scan_directory(path, start_location=0x4003e0):
-    """
-    Reads all object files in a given directory and assigns a preferred location
-    for each object's .text section. Returns a symbol map containing a
-    preferred locations for each symbol defined in all these objects.
-    """
-    location = dict()
-    symbol_map = dict() # maps symbol name to its preferred location
-    current = 0
+def create_section_map(path, start_location=0x4003e0):
+    section_map = dict()
+    section_start = start_location
 
-    print('Determining object locations...', end='')
-    for file_name in glob.glob(path + "/*.o"):
-        with open(file_name, 'rb') as fp:
-            elf_file = ELFFile(fp)
-            location[file_name] = current
-            # TODO: support alignment, objects without .text sections etc.
-            current += elf_file.get_section_by_name('.text').header.sh_size
-    print('DONE')
+    for ident, elf_file in iter_path_objects(path):
+        # TODO: support alignment, page-level permissions etc.
+        for section in elf_file.iter_sections():
+            # TODO: skip sections that will not be loaded to memory (.comment etc)
+            if section.name is not None and len(section.name) > 0:
+                section_map[(ident, section.name)] = section_start
+                section_start += section.header.sh_size
 
-    print('Calculating the symbol map...', end='')
-    for (file_name, location) in location.items():
-        # add a "section" symbol for each object .text section
-        symbol_map[os.path.basename(file_name) + '#.text'] = location
-        with open(file_name, 'rb') as fp:
-            elf_file = ELFFile(fp)
-            symbol_map.update(get_symbol_locations(elf_file, location))
-    print('DONE')
+    return section_map
 
-    with open(path + '/.symbol_map', 'w') as fp:
-        pickle.dump(symbol_map, fp)
+
+def create_symbol_map(path, section_map):
+    symbol_map = dict()
+
+    for ident, elf_file in iter_path_objects(path):
+        symtab = elf_file.get_section_by_name('.symtab')
+        if symtab is None: continue # no symbols
+
+        for symbol in symtab.iter_symbols():
+            if not isinstance(symbol.entry.st_shndx, int):
+                continue # no associated section
+
+            section = elf_file.get_section(symbol.entry.st_shndx)
+            section_loc = section_map.get((ident, section.name))
+            if section_loc is not None:
+                symbol_loc = section_loc + symbol.entry.st_value
+                symbol_map[symbol.name] = symbol_loc
 
     return symbol_map
 
 
 def process_directory(path):
-    try:
-        with open(path + '/.symbol_map', 'r') as fp:
-            symbol_map = pickle.load(fp)
-            print('Loaded precomputed symbol map.')
-    except IOError:
-        symbol_map = scan_directory(path)
+    section_map = get_resouce(path, 'section_map')
+    symbol_map = get_resouce(path, 'symbol_map')
 
     for file_name in glob.glob(path + "/*.o"):
-        symbol_map['.text'] = symbol_map[os.path.basename(file_name) + '#.text']
-        set_preffered(file_name, symbol_map)
+        set_preffered(file_name, symbol_map) # TODO: section locations
 
     stats.print()
